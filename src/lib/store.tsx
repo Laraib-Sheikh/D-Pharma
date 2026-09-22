@@ -43,7 +43,11 @@ type PlatformContextValue = {
     shift: string;
   }) => Batch | null;
   updateStepFields: (batchId: string, stepId: string, values: Record<string, string>) => void;
-  completeStep: (batchId: string, stepId: string) => { ok: boolean; error?: string };
+  completeStep: (
+    batchId: string,
+    stepId: string,
+    values?: Record<string, string>,
+  ) => { ok: boolean; error?: string };
   signOffStep: (batchId: string, stepId: string) => { ok: boolean; error?: string };
   startBatch: (batchId: string) => { ok: boolean; error?: string };
 };
@@ -325,15 +329,21 @@ export function PlatformProvider({ children }: { children: ReactNode }) {
   );
 
   const completeStep = useCallback(
-    (batchId: string, stepId: string) => {
+    (batchId: string, stepId: string, values?: Record<string, string>) => {
       if (!user) return { ok: false, error: "Not signed in" };
       const batch = state.batches.find((b) => b.id === batchId);
       if (!batch) return { ok: false, error: "Batch not found" };
       if (batch.assignedTo !== user.id && user.role !== "supervisor" && user.role !== "manager") {
         return { ok: false, error: "Only the assigned operator can complete this step." };
       }
-      const step = batch.steps.find((x) => x.id === stepId);
-      if (!step) return { ok: false, error: "Step not found" };
+      const stepRaw = batch.steps.find((x) => x.id === stepId);
+      if (!stepRaw) return { ok: false, error: "Step not found" };
+      const step: BatchStep = {
+        ...stepRaw,
+        fields: stepRaw.fields.map((f) =>
+          values && values[f.key] !== undefined ? { ...f, value: values[f.key] } : f,
+        ),
+      };
       const missing = step.fields.filter((f) => !f.value?.trim());
       if (missing.length) {
         return { ok: false, error: `Fill required fields: ${missing.map((m) => m.label).join(", ")}` };
@@ -348,29 +358,27 @@ export function PlatformProvider({ children }: { children: ReactNode }) {
           if (b.id !== batchId) return b;
           const nextSteps = b.steps.map((st) => {
             if (st.id !== stepId) return st;
-            if (st.requiresSignoff) {
-              return {
-                ...st,
-                status: deviation ? ("deviation" as const) : ("awaiting_signoff" as const),
-                completedAt: now,
-                completedBy: user.id,
-                deviationNote: deviation
-                  ? "Value outside standard parameter range — supervisor review required"
-                  : undefined,
-              };
-            }
-            return {
+            const withValues: BatchStep = {
               ...st,
-              status: deviation ? ("deviation" as const) : ("completed" as const),
+              fields: step.fields,
               completedAt: now,
               completedBy: user.id,
               deviationNote: deviation
-                ? "Value outside standard parameter range"
+                ? st.requiresSignoff
+                  ? "Value outside standard parameter range — supervisor review required"
+                  : "Value outside standard parameter range"
                 : undefined,
+              status: st.requiresSignoff
+                ? deviation
+                  ? "deviation"
+                  : "awaiting_signoff"
+                : deviation
+                  ? "deviation"
+                  : "completed",
             };
+            return withValues;
           });
 
-          // Auto-open next step if no signoff needed
           const idx = nextSteps.findIndex((st) => st.id === stepId);
           const current = nextSteps[idx];
           if (current?.status === "completed" && nextSteps[idx + 1]?.status === "pending") {
@@ -392,7 +400,9 @@ export function PlatformProvider({ children }: { children: ReactNode }) {
           }
 
           const allDone = nextSteps.every((st) => st.status === "completed");
-          const awaiting = nextSteps.some((st) => st.status === "awaiting_signoff" || st.status === "deviation");
+          const awaiting = nextSteps.some(
+            (st) => st.status === "awaiting_signoff" || st.status === "deviation",
+          );
 
           return {
             ...b,
